@@ -1,0 +1,112 @@
+---
+# Tasks for rke2-base role — system preparation for RKE2 nodes
+#
+# IMPORTANT: etcd user is ALWAYS created here (minimum CIS compliance).
+# Full CIS hardening is handled by the cis-hardening role (optional).
+
+- name: Install required packages
+  ansible.builtin.apt:
+    name: "{{ rke2_base_packages }}"
+    state: present
+    update_cache: true
+  retries: 3
+  delay: 5
+
+- name: Load kernel modules
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ rke2_base_kernel_modules }}"
+
+- name: Persist kernel modules across reboots
+  ansible.builtin.lineinfile:
+    path: /etc/modules-load.d/rke2.conf
+    line: "{{ item }}"
+    create: true
+    mode: "0644"
+  loop: "{{ rke2_base_kernel_modules }}"
+
+- name: Apply sysctl settings
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-rke2.conf
+    reload: true
+  loop: "{{ rke2_base_sysctl | dict2items }}"
+
+- name: Enable and start iscsid
+  ansible.builtin.systemd:
+    name: iscsid
+    enabled: true
+    state: started
+
+# ──────────────────────────────────────────────────────────────────────────────
+# etcd user — ALWAYS created (minimum CIS compliance)
+#
+# DECISION: Create etcd user unconditionally, even without enable_cis_hardening.
+# Why: RKE2 with CIS profile (profile: cis) checks for etcd user at startup
+#      and exits with a fatal error if missing. Having the user always present
+#      means any image built by this Packer pipeline is CIS-ready, regardless
+#      of whether the operator later enables the CIS profile on their cluster.
+#      Cost: zero. One system user with nologin shell.
+# ──────────────────────────────────────────────────────────────────────────────
+
+- name: Create etcd system user for CIS compliance (always)
+  ansible.builtin.user:
+    name: etcd
+    system: true
+    shell: /sbin/nologin
+    create_home: false
+    comment: "etcd user for RKE2 CIS compliance"
+
+- name: Create RKE2 config directory
+  ansible.builtin.file:
+    path: /etc/rancher/rke2
+    state: directory
+    mode: "0700"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# RKE2 binary pre-installation
+# ──────────────────────────────────────────────────────────────────────────────
+
+- name: Pre-install RKE2 binaries (server + agent)
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {% if kubernetes_version != "" %}
+    INSTALL_RKE2_VERSION="{{ kubernetes_version }}" \
+    {% endif %}
+    INSTALL_RKE2_SKIP_START=true \
+    sh -c "$(curl -sfL https://get.rke2.io)"
+  args:
+    creates: /usr/local/bin/rke2
+    executable: /bin/bash
+  retries: 3
+  delay: 10
+
+- name: Pre-install RKE2 agent binaries
+  ansible.builtin.shell: |
+    set -euo pipefail
+    {% if kubernetes_version != "" %}
+    INSTALL_RKE2_VERSION="{{ kubernetes_version }}" \
+    {% endif %}
+    INSTALL_RKE2_TYPE=agent \
+    INSTALL_RKE2_SKIP_START=true \
+    sh -c "$(curl -sfL https://get.rke2.io)"
+  args:
+    creates: /usr/local/lib/systemd/system/rke2-agent.service
+    executable: /bin/bash
+  retries: 3
+  delay: 10
+
+- name: Record pre-installed RKE2 version into image metadata file
+  ansible.builtin.shell: |
+    /usr/local/bin/rke2 --version | head -1 | awk '{print $3}'
+  register: _rke2_installed_version
+  changed_when: false
+
+- name: Write RKE2 version stamp file
+  ansible.builtin.copy:
+    content: "{{ _rke2_installed_version.stdout | trim }}\n"
+    dest: /etc/rke2-image-version
+    mode: "0444"

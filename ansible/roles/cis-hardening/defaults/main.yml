@@ -1,0 +1,94 @@
+---
+# Default variables for cis-hardening wrapper role
+#
+# Wrapper around ansible-lockdown/UBUNTU24-CIS with RKE2-safe defaults.
+
+# ── CIS Benchmark scope ─────────────────────────────────────────────────────
+ubtu24cis_level_1: true
+ubtu24cis_level_2: false
+
+ubtu24cis_section1: true
+ubtu24cis_section2: true
+ubtu24cis_section3: true
+# ubtu24cis_section4 is set in vars/main.yml (true — UFW with K8s rules)
+ubtu24cis_section5: true
+ubtu24cis_section6: true
+ubtu24cis_section7: true
+
+# ── Build-time settings ──────────────────────────────────────────────────────
+skip_reboot: true
+setup_audit: false
+run_audit: false
+audit_only: false
+system_is_ec2: false
+
+# ── Section 1: Filesystem & Boot ─────────────────────────────────────────────
+ubtu24cis_apparmor_disable: false
+ubtu24cis_apparmor_mode: enforce
+ubtu24cis_ask_passwd_to_boot: false
+ubtu24cis_set_grub_user_pass: false
+ubtu24cis_set_boot_pass: false
+
+# Skip GDM controls — headless servers
+ubtu24cis_rule_1_7_1: false
+ubtu24cis_rule_1_7_2: false
+ubtu24cis_rule_1_7_3: false
+ubtu24cis_rule_1_7_4: false
+ubtu24cis_rule_1_7_5: false
+ubtu24cis_rule_1_7_6: false
+ubtu24cis_rule_1_7_7: false
+
+ubtu24cis_warning_banner: |
+  Authorized users only. All activity may be monitored and reported.
+
+# ── Section 2: Services & Time ───────────────────────────────────────────────
+ubtu24cis_time_sync_tool: "systemd-timesyncd"
+
+# ── Section 3: Network ───────────────────────────────────────────────────────
+# IPv6 MUST remain enabled — Hetzner cloud-init depends on it
+ubtu24cis_ipv6_required: true
+ubtu24cis_rule_3_1_1: false
+ubtu24cis_install_network_manager: false
+ubtu24cis_rule_3_1_2: false
+ubtu24cis_bluetooth_service: false
+
+# ── Section 4: Host-based Firewall (UFW) ─────────────────────────────────────
+# DECISION: Use UFW as the single firewall utility (CIS 4.1.1).
+ubtu24cis_firewall_package: "ufw"
+# DECISION: Allow all outbound traffic — K8s nodes need unrestricted egress
+# for image pulls, DNS, API calls, etcd backup to S3, etc.
+ubtu24cis_ufw_allow_out_ports: "all"
+
+# ── Section 5: SSH & Access ──────────────────────────────────────────────────
+ubtu24cis_sshd_allow_users: "root"
+ubtu24cis_sshd_log_level: "INFO"
+ubtu24cis_sshd_max_auth_tries: 4
+ubtu24cis_sshd_max_sessions: 10
+ubtu24cis_sshd_login_grace_time: 60
+ubtu24cis_sshd_client_alive_interval: 300
+ubtu24cis_sshd_client_alive_count_max: 3
+
+ubtu24cis_sudoers_exclude_nopasswd_list:
+  - root
+
+# Disable CIS rule 5.4.2.5 — upstream bug with ansible-core 2.20
+ubtu24cis_rule_5_4_2_5: false
+
+# ── Section 6: Logging ───────────────────────────────────────────────────────
+ubtu24cis_syslog_service: "journald"
+
+# ── Section 7: File Permissions ──────────────────────────────────────────────
+ubtu24cis_exclude_unowned_search_path: >-
+  \( ! -path "/run/user/*"
+  -a ! -path "/proc/*"
+  -a ! -path "*/containerd/*"
+  -a ! -path "*/kubelet/pods/*"
+  -a ! -path "*/kubelet/plugins/*"
+  -a ! -path "/sys/fs/cgroup/memory/*"
+  -a ! -path "/var/*/private/*"
+  -a ! -path "/snap/*"
+  -a ! -path "/var/lib/rancher/*"
+  -a ! -path "/run/k3s/*"
+  \)
+
+ubtu24cis_suid_sgid_adjust: false

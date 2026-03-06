@@ -1,0 +1,18 @@
+---
+# Ansible playbook for RKE2 Golden Image preparation
+#
+# Two-phase playbook:
+#   Phase 1 (rke2-base): ALWAYS — packages, kernel modules, sysctl, RKE2
+#                        binaries, AND etcd user (minimum CIS compliance).
+#   Phase 2 (cis-hardening): OPTIONAL — full CIS Level 1 benchmark hardening.
+
+- name: Prepare RKE2 Golden Image
+  hosts: all
+  become: true
+  roles:
+    # Phase 1: Always — packages, kernel modules, sysctl, RKE2 binaries, etcd user.
+    - rke2-base
+
+    # Phase 2: Optional — CIS Level 1 hardening (Ubuntu 24.04 CIS Benchmark v1.0.0).
+    - role: cis-hardening
+      when: enable_cis_hardening | default(false) | bool

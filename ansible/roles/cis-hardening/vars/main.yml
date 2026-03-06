@@ -1,0 +1,17 @@
+---
+# CRITICAL overrides — vars/main.yml takes precedence over upstream defaults.
+
+# IPv6: DO NOT DISABLE — breaks Hetzner Cloud networking
+ubtu24cis_ipv6_required: true
+ubtu24cis_rule_3_1_1: false
+
+# Section 4: Host-based firewall — ENABLED with Kubernetes-compatible UFW rules.
+# DECISION: UFW as host-based firewall alongside Hetzner Cloud Firewall (defense in depth).
+# Why: CIS requires a host-based firewall. Hetzner Cloud Firewall alone was a compensating
+#      control; enabling UFW achieves full CIS Section 4 compliance while post-CIS tasks
+#      add Kubernetes/RKE2 port rules and override the routing policy for CNI.
+ubtu24cis_section4: true
+
+# NetworkManager: DO NOT INSTALL — conflicts with Hetzner netplan
+ubtu24cis_install_network_manager: false
+ubtu24cis_rule_3_1_2: false
