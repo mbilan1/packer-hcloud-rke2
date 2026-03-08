@@ -81,8 +81,8 @@ variable "enable_cis_hardening" {
 #   Override:     my-custom-name-1772749791
 # ──────────────────────────────────────────────────────────────────────────────
 locals {
-  os_tag     = replace(var.base_image, ".", "")           # ubuntu-24.04 → ubuntu-2404
-  rke2_ver   = split("+", var.kubernetes_version)[0]      # v1.34.4+rke2r1 → v1.34.4
+  os_tag     = replace(var.base_image, ".", "")      # ubuntu-24.04 → ubuntu-2404
+  rke2_ver   = split("+", var.kubernetes_version)[0] # v1.34.4+rke2r1 → v1.34.4
   cis_suffix = var.enable_cis_hardening ? "-cis-l1" : ""
 
   auto_snapshot_name = "${local.os_tag}-rke2-${local.rke2_ver}${local.cis_suffix}"
