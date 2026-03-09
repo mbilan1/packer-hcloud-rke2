@@ -2,6 +2,11 @@
 
 [![Lint: Packer](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml/badge.svg)](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml)
 
+<!-- Version badges — source: rke2-base.pkr.hcl (required_plugins) -->
+![Packer](https://img.shields.io/badge/Packer-HCL2-02A8EF?logo=packer&logoColor=white)
+![hcloud plugin](https://img.shields.io/badge/hcloud-%3E%3D1.6.0-E10000?logo=hetzner&logoColor=white)
+![ansible plugin](https://img.shields.io/badge/ansible-%3E%3D1.1.0-EE0000?logo=ansible&logoColor=white)
+
 > **⚠️ Experimental (Beta)** — This is an **unofficial** community implementation, under active development and **not production-ready**.
 > Image contents, Ansible roles, and behavior may change without notice. Use at your own risk.
 > No stability guarantees are provided until v1.0.0.

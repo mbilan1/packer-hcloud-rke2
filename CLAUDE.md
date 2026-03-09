@@ -84,6 +84,22 @@ packer build \
 
 ---
 
+## Workflow: Updating Version Badges
+
+README.md contains version badges (shields.io) that must stay in sync with `rke2-base.pkr.hcl`.
+
+| Badge | Source of truth | Badge URL parameter |
+|---|---|---|
+| hcloud plugin | `rke2-base.pkr.hcl` → `required_plugins.hcloud.version` | `hcloud-<version>` |
+| ansible plugin | `rke2-base.pkr.hcl` → `required_plugins.ansible.version` | `ansible-<version>` |
+
+When bumping a plugin version:
+1. Update `rke2-base.pkr.hcl`
+2. Update the matching badge URL in README.md (search for `img.shields.io/badge/<name>`)
+3. Run `packer validate .`
+
+---
+
 ## Code Style
 
 - **Packer formatting**: `packer fmt` canonical style
