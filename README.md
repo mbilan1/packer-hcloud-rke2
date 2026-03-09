@@ -1,6 +1,8 @@
 # packer-hcloud-rke2
 
 [![Lint: Packer](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml/badge.svg)](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml)
+[![SAST: Checkov](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/sast-checkov.yml/badge.svg)](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/sast-checkov.yml)
+[![SAST: KICS](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/sast-kics.yml/badge.svg)](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/sast-kics.yml)
 
 <!-- Version badges — source: rke2-base.pkr.hcl (required_plugins) -->
 ![Packer](https://img.shields.io/badge/Packer-HCL2-02A8EF?logo=packer&logoColor=white)
