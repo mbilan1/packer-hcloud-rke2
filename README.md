@@ -1,5 +1,7 @@
 # packer-hcloud-rke2
 
+[![Lint: Packer](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml/badge.svg)](https://github.com/mbilan1/packer-hcloud-rke2/actions/workflows/lint-packer.yml)
+
 > **⚠️ Experimental (Beta)** — This is an **unofficial** community implementation, under active development and **not production-ready**.
 > Image contents, Ansible roles, and behavior may change without notice. Use at your own risk.
 > No stability guarantees are provided until v1.0.0.
