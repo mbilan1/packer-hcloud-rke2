@@ -25,6 +25,14 @@ packer {
   }
 }
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Variables
+#
+# DECISION: These defaults are the single source of truth for STANDALONE Packer builds.
+# For the controller (K8s) path, defaults live in chart/golden-image-controller/values.yaml.
+# Do NOT duplicate these values in builder/entrypoint.sh or controller/main.go.
+# ──────────────────────────────────────────────────────────────────────────────
+
 variable "hcloud_token" {
   description = "Hetzner Cloud API token with read/write access."
   type        = string
@@ -97,6 +105,10 @@ source "hcloud" "rke2_base" {
   server_name = "packer-rke2-base-{{timestamp}}"
 
   snapshot_name = "${local.snapshot_name}-{{timestamp}}"
+
+  # NOTE: These labels are the contract between Packer (writes) and the controller (reads).
+  # controller/main.go → findSnapshot() queries by: managed-by, rke2-version, cis-hardened.
+  # If you add/rename labels here, update findSnapshot() to match.
   snapshot_labels = {
     "managed-by"    = "packer"
     "role"          = "rke2-base"

@@ -2,3 +2,7 @@
 packer_cache/
 output-*/
 *.log
+
+# Go controller build artifacts
+controller/bin/
+controller/vendor/

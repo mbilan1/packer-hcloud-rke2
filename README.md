@@ -138,15 +138,45 @@ done
 | Creating another cluster in the same project | No — reuse existing snapshot |
 | New Hetzner project | Yes — one build per project |
 
+## Golden Image Controller (DES-004)
+
+In addition to standalone Packer builds, this repository includes a **Kubernetes controller**
+that automates snapshot creation. When a downstream cluster's `HetznerConfig` uses the
+`golden:*` image convention (e.g., `golden:cis`), the controller:
+
+1. Checks the Hetzner API for a cached snapshot with matching labels
+2. If cache miss — creates a K8s Job that runs Packer inside the builder container
+3. Patches the `HetznerConfig` with the resolved snapshot ID
+4. Unpauses the machine pool so Rancher can provision nodes
+
+### Components
+
+| Component | Path | Purpose |
+|-----------|------|---------|
+| **Builder** | `builder/` | Docker image (Packer + Ansible) for K8s Jobs |
+| **Controller** | `controller/` | Go controller watching HetznerConfig CRDs |
+| **Chart** | `chart/golden-image-controller/` | Helm chart for deploying the controller |
+
+### Source of Truth for Defaults
+
+Build parameters (RKE2 version, location, server type, base image) are configured in **exactly two places** — one per usage path:
+
+| Path | Source of truth | How it flows |
+|------|----------------|-------------|
+| **Standalone Packer** | `rke2-base.pkr.hcl` variables | User → `packer build` → pkr.hcl defaults |
+| **Controller (K8s)** | `chart/values.yaml` → `defaults` | Helm values → deployment env → controller → Job env → Packer |
+
+The builder entrypoint and controller binary have **no hardcoded defaults** — they pass through
+env vars to Packer. Omitted values fall back to `rke2-base.pkr.hcl` defaults.
+
 ## Directory Structure
 
 ```
-packer/
-├── rke2-base.pkr.hcl              # Packer template (HCL2)
+├── rke2-base.pkr.hcl              # Packer template (source of truth for standalone builds)
 ├── scripts/
 │   └── install-ansible.sh          # Bootstrap Ansible + Galaxy deps
 ├── ansible/
-│   ├── playbook.yml                # Main playbook
+│   ├── playbook.yml                # Main playbook (2-phase: base + optional CIS)
 │   ├── requirements.yml            # Galaxy dependencies
 │   └── roles/
 │       ├── rke2-base/              # Always: packages, kernel, RKE2, etcd user
@@ -156,5 +186,17 @@ packer/
 │           ├── defaults/main.yml
 │           ├── vars/main.yml
 │           └── tasks/main.yml
+├── builder/
+│   ├── Dockerfile                   # Packer container for K8s Jobs
+│   └── entrypoint.sh               # Thin wrapper — passes env vars to Packer
+├── controller/
+│   ├── main.go                      # HetznerConfig reconciler (Go)
+│   ├── Dockerfile                   # Multi-stage build (distroless)
+│   └── go.mod
+├── chart/
+│   └── golden-image-controller/     # Helm chart (source of truth for controller path)
+│       ├── Chart.yaml
+│       ├── values.yaml
+│       └── templates/
 └── README.md
 ```

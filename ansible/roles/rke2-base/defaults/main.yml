@@ -1,8 +1,11 @@
 ---
 # Default variables for rke2-base role
 
-# RKE2 version to pre-install. Must match the cluster's kubernetes version.
-kubernetes_version: "v1.34.4+rke2r1"
+# RKE2 version to pre-install.
+# NOTE: This default is intentionally empty. The actual version is always passed
+# by Packer via --extra-vars (from rke2-base.pkr.hcl variable default or user override).
+# If empty, the RKE2 install script installs the latest stable release.
+kubernetes_version: ""
 
 # Packages to pre-install (reduces cloud-init time by ~2-3 minutes)
 rke2_base_packages:
