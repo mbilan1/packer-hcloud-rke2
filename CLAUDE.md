@@ -78,8 +78,8 @@ packer build -var "hcloud_token=$HCLOUD_TOKEN" -var "enable_cis_hardening=false"
 # Build with custom RKE2 version
 packer build \
   -var "hcloud_token=$HCLOUD_TOKEN" \
-  -var "rke2_version=v1.32.4+rke2r1" \
-  -var 'snapshot_name=rke2-v1.32.4-cis' .
+  -var "kubernetes_version=v1.32.4+rke2r1" \
+  -var 'image_name=rke2-v1.32.4-cis' .
 ```
 
 ---
