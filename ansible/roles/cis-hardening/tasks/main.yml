@@ -3,11 +3,17 @@
 #
 # Runs the upstream CIS benchmark, then applies post-CIS safety fixes
 # for Hetzner Cloud + Kubernetes compatibility.
+#
+# CRITICAL DESIGN: Every task in this file MUST be:
+#   1. IDEMPOTENT — running twice produces the same result
+#   2. REBOOT-SAFE — state survives reboot exactly as intended
+#   3. K8S-COMPATIBLE — does not break RKE2/Canal/kubelet networking
 
-# ── Phase 1: Run upstream CIS hardening ──────────────────────────────────────
+# ── Phase 1: Pre-CIS preparation ────────────────────────────────────────────
 
 # WORKAROUND: sshd privilege separation directory may not exist on fresh images.
 # CIS rule 5.1.5 runs `sshd -t` to validate config, which fails without /run/sshd.
+# NOTE: This is build-time only. At runtime, systemd-tmpfiles.d recreates /run/sshd.
 - name: Ensure sshd privilege separation directory exists
   ansible.builtin.file:
     path: /run/sshd
@@ -16,11 +22,24 @@
     owner: root
     group: root
 
+# DECISION: Stop nftables BEFORE upstream CIS role runs, not after.
+# Why: Ubuntu 24.04 UFW uses iptables backend. If nftables is active during
+#      CIS Section 4 (UFW setup), there's a race condition between nftables
+#      and iptables backends that can cause rules not to persist after reboot.
+- name: Stop nftables before CIS hardening (prevents UFW race condition)
+  ansible.builtin.systemd:
+    name: nftables
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+# ── Phase 2: Run upstream CIS hardening ──────────────────────────────────────
+
 - name: Apply CIS Level 1 hardening (UBUNTU24-CIS)
   ansible.builtin.include_role:
     name: ansible-lockdown.UBUNTU24-CIS
 
-# ── Phase 2: Post-CIS network safety ────────────────────────────────────────
+# ── Phase 3: Post-CIS network safety ────────────────────────────────────────
 
 - name: Remove ipv6.disable=1 from GRUB (breaks Hetzner Cloud networking)
   ansible.builtin.replace:
@@ -32,7 +51,7 @@
 - name: Update GRUB after removing ipv6.disable
   ansible.builtin.command: update-grub
   when: grub_ipv6_fix.changed
-  changed_when: true
+  changed_when: grub_ipv6_fix.changed
 
 - name: Ensure net.ipv4.ip_forward=1 for Kubernetes networking
   ansible.builtin.copy:
@@ -44,21 +63,47 @@
     group: root
     mode: "0644"
 
-# ── Phase 3: AppArmor — relax container-runtime profiles ────────────────────
+# ── Phase 4: AppArmor — relax container-runtime profiles ────────────────────
+#
+# DECISION: Only set complain mode for profiles that actually exist on the system.
+# Why: Blindly running aa-complain on non-existent profiles is not idempotent
+#      and masks real failures with ignore_errors.
 
-- name: Set container-runtime AppArmor profiles to complain mode
+- name: Check which AppArmor profiles exist
+  ansible.builtin.command: aa-status --json
+  register: aa_status
+  changed_when: false
+  failed_when: false
+
+- name: Set existing container-runtime AppArmor profiles to complain mode
   ansible.builtin.command: "aa-complain {{ item }}"
   loop:
-    - busybox
-    - crun
-    - buildah
-    - ch-checkns
-    - ch-run
     - runc
-  ignore_errors: true
-  changed_when: true
+    - crun
+  when: "item in (aa_status.stdout | default(''))"
+  register: aa_complain_result
+  changed_when: "'Setting' in (aa_complain_result.stdout | default(''))"
 
-# ── Phase 4: Post-CIS UFW — Kubernetes/RKE2 port rules ──────────────────────
+# DECISION: Persist AppArmor complain mode across reboots via tunables.
+# Why: aa-complain is runtime-only — after reboot, profiles revert to enforce.
+#      Writing to /etc/apparmor.d/local/ ensures complain mode survives reboots.
+- name: Persist AppArmor complain mode for container runtimes
+  ansible.builtin.copy:
+    content: |
+      # Managed by cis-hardening role — do not edit
+      # Allow container runtimes to operate without AppArmor enforcement.
+      # Required for RKE2/containerd/runc to function correctly.
+      flags=(complain)
+    dest: "/etc/apparmor.d/local/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - runc
+    - crun
+  ignore_errors: true
+
+# ── Phase 5: Post-CIS UFW — Kubernetes/RKE2 port rules ──────────────────────
 #
 # DECISION: CIS Section 4 enables UFW with default deny incoming + deny routed.
 # Post-CIS tasks add RKE2/K8s allow rules and override the routing policy.
@@ -159,14 +204,67 @@
     direction: routed
     default: allow
 
-- name: Ensure nftables does not interfere with UFW
-  ansible.builtin.systemd:
-    name: nftables
-    state: stopped
-    enabled: false
-  ignore_errors: true
+# -- CRITICAL: Set default allow outgoing (CIS deviation for K8s) --
+#
+# DECISION: Override DEFAULT_OUTPUT_POLICY in /etc/default/ufw from DROP to ACCEPT.
+# Why: CIS rule 3.5.1.3 sets "ufw default deny outgoing" which writes
+#      DEFAULT_OUTPUT_POLICY="DROP" to /etc/default/ufw. The community.general.ufw
+#      module sets "ufw default allow outgoing" at runtime, but /etc/default/ufw
+#      is the AUTHORITATIVE source after reboot. After reboot, DROP wins and blocks:
+#      - kube-proxy DNAT'd traffic to apiserver:6443 (kills Canal CNI install)
+#      - kubelet → apiserver communication
+#      - etcd peer traffic
+#      - All K8s internal networking
+# This caused a production incident: Canal install-cni CrashLoopBackOff because
+# 10.43.0.1:443 → DNAT → apiserver:6443 → DROPPED by UFW output policy.
 
-# ── Phase 5: Write hardening metadata ───────────────────────────────────────
+- name: "UFW: Set default allow outgoing (CIS deviation — K8s needs unrestricted egress)"
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+
+- name: "UFW: Ensure /etc/default/ufw has OUTPUT ACCEPT (survives reboot)"
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_OUTPUT_POLICY='
+    line: 'DEFAULT_OUTPUT_POLICY="ACCEPT"'
+    state: present
+
+- name: "UFW: Ensure /etc/default/ufw has FORWARD ACCEPT (survives reboot)"
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: '^DEFAULT_FORWARD_POLICY='
+    line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+    state: present
+
+# ── Phase 6: Verify post-CIS state (idempotency gate) ───────────────────────
+#
+# DECISION: Assert critical system state after all hardening tasks.
+# Why: Upstream CIS role is a black box (447 tasks). We must verify its output
+#      didn't break K8s-required settings. If any assertion fails, the build fails
+#      immediately — no broken images enter the snapshot pipeline.
+
+- name: "Verify: UFW DEFAULT_OUTPUT_POLICY is ACCEPT"
+  ansible.builtin.command: grep -q 'DEFAULT_OUTPUT_POLICY="ACCEPT"' /etc/default/ufw
+  changed_when: false
+
+- name: "Verify: UFW DEFAULT_FORWARD_POLICY is ACCEPT"
+  ansible.builtin.command: grep -q 'DEFAULT_FORWARD_POLICY="ACCEPT"' /etc/default/ufw
+  changed_when: false
+
+- name: "Verify: net.ipv4.ip_forward is enabled"
+  ansible.builtin.command: sysctl -n net.ipv4.ip_forward
+  register: ip_forward_check
+  changed_when: false
+  failed_when: ip_forward_check.stdout | trim != "1"
+
+- name: "Verify: UFW is active"
+  ansible.builtin.command: ufw status
+  register: ufw_status
+  changed_when: false
+  failed_when: "'Status: active' not in ufw_status.stdout"
+
+# ── Phase 7: Write hardening metadata ───────────────────────────────────────
 
 - name: Record CIS hardening metadata
   ansible.builtin.copy:

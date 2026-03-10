@@ -84,6 +84,14 @@
   retries: 3
   delay: 10
 
+# DECISION: Validate RKE2 server binary immediately after install.
+# Why: If curl fails midway, `creates:` guard sees a partial binary and skips
+#      re-download on retry. Running `rke2 --version` proves the binary is intact.
+#      A corrupted binary produces a cryptic ELF error at cluster boot time.
+- name: Validate RKE2 server binary integrity
+  ansible.builtin.command: /usr/local/bin/rke2 --version
+  changed_when: false
+
 - name: Pre-install RKE2 agent binaries
   ansible.builtin.shell: |
     set -euo pipefail
@@ -98,6 +106,12 @@
     executable: /bin/bash
   retries: 3
   delay: 10
+
+- name: Validate RKE2 agent service unit exists
+  ansible.builtin.stat:
+    path: /usr/local/lib/systemd/system/rke2-agent.service
+  register: _rke2_agent_service
+  failed_when: not _rke2_agent_service.stat.exists
 
 - name: Record pre-installed RKE2 version into image metadata file
   ansible.builtin.shell: |

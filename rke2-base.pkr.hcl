@@ -161,6 +161,55 @@ build {
     ]
   }
 
+  # ── Post-build validation gate ─────────────────────────────────────────────
+  #
+  # DECISION: Validate critical system state before creating the snapshot.
+  # Why: If any check fails, Packer aborts — no broken images enter the pipeline.
+  #      This is the last line of defense against CIS/Ansible regressions.
+  provisioner "shell" {
+    inline = [
+      "echo '=== Golden Image Post-Build Validation ==='",
+      "",
+      "# 1. RKE2 binary is intact",
+      "/usr/local/bin/rke2 --version",
+      "",
+      "# 2. RKE2 agent service exists",
+      "test -f /usr/local/lib/systemd/system/rke2-agent.service || { echo 'FAIL: rke2-agent.service missing'; exit 1; }",
+      "",
+      "# 3. etcd user exists (CIS requirement)",
+      "id etcd || { echo 'FAIL: etcd user missing'; exit 1; }",
+      "",
+      "# 4. net.ipv4.ip_forward is enabled",
+      "sysctl -n net.ipv4.ip_forward | grep -q 1 || { echo 'FAIL: ip_forward not enabled'; exit 1; }",
+      "",
+      "# 5. Kernel modules persisted",
+      "test -f /etc/modules-load.d/rke2.conf || { echo 'FAIL: kernel modules config missing'; exit 1; }",
+      "",
+      "# 6. RKE2 version stamp exists",
+      "test -f /etc/rke2-image-version || { echo 'FAIL: version stamp missing'; exit 1; }",
+      "",
+      "# CIS-specific checks (only if hardening was applied)",
+      "if [ -f /etc/cis-hardening-applied ]; then",
+      "  echo '--- CIS hardening validation ---'",
+      "",
+      "  # 7. UFW is active",
+      "  ufw status | grep -q 'Status: active' || { echo 'FAIL: UFW not active'; exit 1; }",
+      "",
+      "  # 8. UFW OUTPUT policy is ACCEPT (CRITICAL — root cause of cluster failures)",
+      "  grep -q 'DEFAULT_OUTPUT_POLICY=\"ACCEPT\"' /etc/default/ufw || { echo 'FAIL: UFW output policy is not ACCEPT — will block K8s after reboot'; exit 1; }",
+      "",
+      "  # 9. UFW FORWARD policy is ACCEPT",
+      "  grep -q 'DEFAULT_FORWARD_POLICY=\"ACCEPT\"' /etc/default/ufw || { echo 'FAIL: UFW forward policy is not ACCEPT — will block CNI after reboot'; exit 1; }",
+      "",
+      "  # 10. AppArmor is running",
+      "  systemctl is-active apparmor || echo 'WARN: AppArmor not active (non-fatal)'",
+      "",
+      "fi",
+      "",
+      "echo '=== All validations PASSED ==='",
+    ]
+  }
+
   # Clean up for snapshot
   provisioner "shell" {
     inline = [
