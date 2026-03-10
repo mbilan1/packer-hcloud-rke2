@@ -62,6 +62,15 @@
     owner: root
     group: root
     mode: "0644"
+  register: ip_forward_conf
+
+# DECISION: Apply sysctl after writing config file, not just at next reboot.
+# Why: CIS upstream role disables ip_forward at runtime (rule 3.3.1).
+#      Our 99-kubernetes-forwarding.conf overrides it for reboot, but the
+#      runtime value stays 0 until we explicitly reload sysctl.
+- name: Apply ip_forward sysctl override (runtime)
+  ansible.builtin.command: sysctl --system
+  changed_when: ip_forward_conf.changed
 
 # ── Phase 4: AppArmor — relax container-runtime profiles ────────────────────
 #
