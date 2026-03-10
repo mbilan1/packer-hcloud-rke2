@@ -44,8 +44,9 @@ defaults:
 # Namespace where the controller runs and builder Jobs are created.
 namespace: golden-image-system
 
-# Create the namespace (set to false if it already exists).
-createNamespace: true
+# Create the namespace via chart template.
+# Set to false when using `helm install --create-namespace` (recommended).
+createNamespace: false
 
 # ── Service Account ───────────────────────────────────────────────────────────
 
