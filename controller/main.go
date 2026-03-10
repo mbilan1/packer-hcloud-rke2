@@ -12,10 +12,18 @@
 //	  → Job builds snapshot on Hetzner Cloud
 //	  → Controller detects Job completion → queries Hetzner API → gets snapshot ID
 //	  → Patches HetznerConfig (image: "12345") → unpauses machine pool
+//
+// Idempotency guarantees:
+//   - Job names are deterministic (hash of config name + spec) — no duplicates
+//   - Credential Secrets have OwnerReference → garbage collected with Job
+//   - Leader election prevents concurrent controller instances
+//   - Check-before-create prevents orphaned resources
+//   - Exponential backoff prevents API hammering on failures
 package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -130,7 +138,13 @@ func main() {
 		"defaultRKE2Version", cfg.RKE2Version,
 	)
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{})
+	// DECISION: Enable leader election to prevent concurrent controller instances.
+	// Why: Without it, two replicas (e.g., during rolling update) can both create
+	//      Jobs for the same HetznerConfig, leading to duplicate builds and wasted resources.
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		LeaderElection:   true,
+		LeaderElectionID: "golden-image-controller.cattle.io",
+	})
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
 		os.Exit(1)
@@ -266,26 +280,60 @@ func (r *HetznerConfigReconciler) handleNew(ctx context.Context, hc *unstructure
 		return r.resolveImage(ctx, hc, cluster, snapshotID, image)
 	}
 
-	// Cache miss — pause machine pool and create builder Job.
-	log.Info("cache miss — creating builder job", "config", configName)
+	// Cache miss — check if a builder Job already exists (idempotency guard).
+	// DECISION: Use deterministic job name derived from config name + spec hash.
+	// Why: Timestamp-based names cause collisions at second precision and
+	//      create orphaned Jobs on annotation patch failure. A deterministic name
+	//      means check-before-create is reliable: same config always produces same Job name.
+	jobName := r.deterministicJobName(configName, spec)
+
+	existingJob := &batchv1.Job{}
+	err = r.Get(ctx, types.NamespacedName{Name: jobName, Namespace: r.Config.JobNamespace}, existingJob)
+	if err == nil {
+		// Job already exists — mark as building and wait for it.
+		log.Info("builder job already exists, setting status to building", "job", jobName)
+		if err := r.setAnnotations(ctx, hc, map[string]string{
+			annotationStatus: "building",
+			annotationJob:    jobName,
+			annotationSpec:   image,
+		}); err != nil {
+			log.Error(err, "failed to annotate config")
+		}
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+
+	// Job doesn't exist — pause machine pool and create builder Job.
+	log.Info("cache miss, no existing job — creating builder job", "config", configName)
 
 	if err := r.setMachinePoolPaused(ctx, cluster, configName, true); err != nil {
 		log.Error(err, "failed to pause machine pool")
 		// Continue anyway — pausing is best-effort.
 	}
 
-	jobName, err := r.createBuilderJob(ctx, configName, token, enableCIS)
-	if err != nil {
-		log.Error(err, "failed to create builder job")
-		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
-	}
-
+	// DECISION: Set annotations BEFORE creating the Job.
+	// Why: If Job creation succeeds but annotation patch fails, the next reconcile
+	//      would see no status annotation and try to create a duplicate Job.
+	//      By annotating first, the duplicate is prevented (handleBuilding handles it).
+	//      If annotation succeeds but Job creation fails, handleBuilding resets
+	//      when it can't find the Job (already handled).
 	if err := r.setAnnotations(ctx, hc, map[string]string{
 		annotationStatus: "building",
 		annotationJob:    jobName,
 		annotationSpec:   image,
 	}); err != nil {
-		log.Error(err, "failed to annotate config")
+		log.Error(err, "failed to annotate config before job creation")
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+	}
+
+	_, err = r.createBuilderJob(ctx, configName, spec, token, enableCIS, jobName)
+	if err != nil {
+		log.Error(err, "failed to create builder job")
+		// Reset annotation so next reconcile can retry.
+		_ = r.setAnnotations(ctx, hc, map[string]string{annotationStatus: ""})
+		return ctrl.Result{RequeueAfter: 1 * time.Minute}, nil
 	}
 
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -305,6 +353,20 @@ func (r *HetznerConfigReconciler) handleBuilding(ctx context.Context, hc *unstru
 	}
 
 	if jobName == "" {
+		// DECISION: Try to recover job reference from deterministic name before resetting.
+		// Why: If annotation was corrupted, we can still find the Job by name.
+		if originalSpec != "" {
+			spec := strings.TrimPrefix(originalSpec, goldenPrefix)
+			recoveredName := r.deterministicJobName(configName, spec)
+			existingJob := &batchv1.Job{}
+			if err := r.Get(ctx, types.NamespacedName{Name: recoveredName, Namespace: r.Config.JobNamespace}, existingJob); err == nil {
+				log.Info("recovered lost job reference", "config", configName, "job", recoveredName)
+				_ = r.setAnnotations(ctx, hc, map[string]string{
+					annotationJob: recoveredName,
+				})
+				return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+			}
+		}
 		log.Info("lost job reference, resetting", "config", configName)
 		return ctrl.Result{RequeueAfter: 10 * time.Second},
 			r.setAnnotations(ctx, hc, map[string]string{annotationStatus: ""})
@@ -329,6 +391,15 @@ func (r *HetznerConfigReconciler) handleBuilding(ctx context.Context, hc *unstru
 		}
 		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
 			log.Info("builder job failed", "job", jobName, "reason", c.Reason)
+			// WORKAROUND: Packer may have completed the build but Hetzner snapshot
+			// creation outlasted the Job deadline. Check if snapshot appeared anyway.
+			if c.Reason == "DeadlineExceeded" {
+				result, err := r.handleJobCompleted(ctx, hc, originalSpec)
+				if err == nil {
+					return result, nil
+				}
+				log.Info("snapshot not found after deadline, marking failed")
+			}
 			return ctrl.Result{},
 				r.setAnnotations(ctx, hc, map[string]string{annotationStatus: "failed"})
 		}
@@ -552,41 +623,51 @@ func (r *HetznerConfigReconciler) findSnapshot(ctx context.Context, token string
 
 // createBuilderJob creates a K8s Job that runs the golden-image-builder container.
 // The Job builds a Hetzner Cloud snapshot using Packer + Ansible.
-func (r *HetznerConfigReconciler) createBuilderJob(ctx context.Context, configName string, token string, enableCIS bool) (string, error) {
+//
+// DECISION: Job name is deterministic (passed in by caller).
+// Why: Prevents duplicate Jobs for the same config+spec. Caller checks if Job
+//      already exists before calling this function.
+func (r *HetznerConfigReconciler) createBuilderJob(ctx context.Context, configName string, spec string, token string, enableCIS bool, jobName string) (string, error) {
 	cisFlag := "false"
 	if enableCIS {
 		cisFlag = "true"
 	}
 
-	jobName := fmt.Sprintf("golden-build-%s-%d", sanitizeName(configName), time.Now().Unix())
-	if len([]rune(jobName)) > 63 {
-		jobName = string([]rune(jobName)[:63])
-	}
-	jobName = strings.TrimRight(jobName, "-")
-
 	// DECISION: Store HCLOUD_TOKEN in a temporary Secret, not in the Job spec.
 	// Why: Prevents token from being visible in `kubectl describe job` output.
 	secretName := jobName + "-cred"
-	credSecret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: r.Config.JobNamespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/managed-by":  "golden-image-controller",
-				"golden-image.cattle.io/config": configName,
-			},
-		},
-		Data: map[string][]byte{
-			"HCLOUD_TOKEN": []byte(token),
-		},
+
+	// Check if secret already exists (idempotency guard).
+	existingSecret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: r.Config.JobNamespace}, existingSecret)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return "", fmt.Errorf("check credential secret: %w", err)
 	}
-	if err := r.Create(ctx, credSecret); err != nil {
-		return "", fmt.Errorf("create credential secret: %w", err)
+
+	if apierrors.IsNotFound(err) {
+		credSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      secretName,
+				Namespace: r.Config.JobNamespace,
+				Labels: map[string]string{
+					"app.kubernetes.io/managed-by":  "golden-image-controller",
+					"golden-image.cattle.io/config": configName,
+				},
+			},
+			Data: map[string][]byte{
+				"HCLOUD_TOKEN": []byte(token),
+			},
+		}
+		if err := r.Create(ctx, credSecret); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return "", fmt.Errorf("create credential secret: %w", err)
+			}
+		}
 	}
 
 	backoffLimit := int32(2)
-	deadline := int64(1800)  // 30 minutes
-	ttl := int32(3600)       // Clean up 1 hour after completion
+	deadline := int64(3600) // 60 minutes — CIS builds take ~20 min + snapshot creation can take 10+ min
+	ttl := int32(3600)      // Clean up 1 hour after completion
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -636,9 +717,33 @@ func (r *HetznerConfigReconciler) createBuilderJob(ctx context.Context, configNa
 	}
 
 	if err := r.Create(ctx, job); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			// Job already exists — idempotent success.
+			return jobName, nil
+		}
 		// Clean up the credential secret if Job creation fails.
-		_ = r.Delete(ctx, credSecret)
+		_ = r.Delete(ctx, &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.Config.JobNamespace},
+		})
 		return "", fmt.Errorf("create builder job: %w", err)
+	}
+
+	// DECISION: Set OwnerReference on Secret AFTER Job creation.
+	// Why: OwnerReference needs the Job UID. When Job's TTL garbage-collects it,
+	//      the credential Secret is automatically deleted too — no orphans.
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: r.Config.JobNamespace}, secret); err == nil {
+		trueVal := true
+		secret.OwnerReferences = []metav1.OwnerReference{
+			{
+				APIVersion:         "batch/v1",
+				Kind:               "Job",
+				Name:               job.Name,
+				UID:                job.UID,
+				BlockOwnerDeletion: &trueVal,
+			},
+		}
+		_ = r.Update(ctx, secret)
 	}
 
 	return jobName, nil
@@ -763,6 +868,24 @@ func sanitizeName(s string) string {
 		out = strings.ReplaceAll(out, "--", "-")
 	}
 	return out
+}
+
+// deterministicJobName generates a stable, collision-free Job name from config + spec.
+// DECISION: Use SHA-256 hash of (configName + spec + rke2Version) truncated to 8 hex chars.
+// Why: Timestamp-based names caused collisions at second precision and made
+//      check-before-create impossible (new name every time = always creates new Job).
+//      A deterministic name means: same input → same Job name → idempotent creation.
+//
+// To rebuild after a failed attempt, operator clears status annotation AND deletes
+// the old Job — next reconcile creates a new Job with the same deterministic name.
+func (r *HetznerConfigReconciler) deterministicJobName(configName string, spec string) string {
+	hash := sha256.Sum256([]byte(configName + "/" + spec + "/" + r.Config.RKE2Version))
+	suffix := fmt.Sprintf("%x", hash[:4]) // 8 hex chars
+	name := fmt.Sprintf("golden-build-%s-%s", sanitizeName(configName), suffix)
+	if len(name) > 63 {
+		name = name[:63]
+	}
+	return strings.TrimRight(name, "-")
 }
 
 // getEnv returns the value of an environment variable, or a fallback default.
