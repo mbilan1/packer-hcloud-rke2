@@ -1,8 +1,0 @@
-{{- if .Values.createNamespace }}
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: {{ include "golden-image-controller.namespace" . }}
-  labels:
-    {{- include "golden-image-controller.labels" . | nindent 4 }}
-{{- end }}
