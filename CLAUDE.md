@@ -30,6 +30,7 @@ A **Packer template** that builds RKE2 node images (Hetzner Cloud snapshots) wit
 | Manage cluster state | No state files — Packer is stateless |
 | Deploy to downstream projects | Snapshots are project-scoped (see ADR-009) |
 | Install CCM/CSI | Those are cluster-level addons, not node-level |
+| Run the Hcloud Image Controller | Controller + Helm chart live in `rancher-hcloud-image-controller` |
 
 ---
 
@@ -40,6 +41,7 @@ A **Packer template** that builds RKE2 node images (Hetzner Cloud snapshots) wit
 | `terraform-hcloud-rke2-core` | L3 infrastructure — consumes snapshots via `hcloud_image` |
 | `terraform-hcloud-rancher` | Management cluster (uses snapshots for management nodes) |
 | `rancher-hetzner-cluster-templates` | Downstream cluster templates (specify snapshot ID) |
+| `rancher-hcloud-image-controller` | Kubernetes controller + Helm chart that triggers Packer builds from Rancher |
 | `rke2-hetzner-architecture` | Architecture decisions (ADR-009: golden image delivery) |
 | `hcloud-image-replicator` | Cross-project snapshot replication (prototype) |
 
