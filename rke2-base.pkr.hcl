@@ -71,7 +71,7 @@ variable "image_name" {
 variable "kubernetes_version" {
   description = "RKE2 release tag to pre-install. Must match the cluster's kubernetes version."
   type        = string
-  default     = "v1.34.4+rke2r1"
+  default     = "v1.35.3+rke2r1"
 }
 
 variable "enable_cis_hardening" {
